@@ -137,13 +137,18 @@ function Show-List {
     Write-Host "Bluetooth Devices:" -ForegroundColor Green
     Write-Host ("-" * 60)
 
+    $index = 1
     foreach ($dev in $devices) {
         $statusColor = if ($dev.Status -eq "OK") { "Green" } else { "Yellow" }
-        Write-Host ("  {0}" -f $dev.Name) -ForegroundColor White -NoNewline
+        Write-Host ("  [{0}] {1}" -f $index, $dev.Name) -ForegroundColor White -NoNewline
         Write-Host (" [{0}]" -f $dev.Status) -ForegroundColor $statusColor
-        Write-Host ("    Class: {0}" -f $dev.Class) -ForegroundColor Gray
+        Write-Host ("      Class: {0}" -f $dev.Class) -ForegroundColor Gray
+        $index++
     }
 
+    Write-Host ""
+    Write-Host "Tip: Use 'disconnect' or 'connect' with '--all' to target all" -ForegroundColor Gray
+    Write-Host "     devices with the same name at once." -ForegroundColor Gray
     Write-Host ""
 }
 
@@ -154,6 +159,7 @@ function Set-DeviceState {
     )
 
     $action = if ($Enable) { "connect" } else { "disconnect" }
+    $actionVerb = if ($Enable) { "Enabling" } else { "Disabling" }
     $actionPast = if ($Enable) { "enabled" } else { "disabled" }
 
     if ([string]::IsNullOrWhiteSpace($Name)) {
@@ -165,60 +171,84 @@ function Set-DeviceState {
     $devices = Get-BluetoothAudioDevices
 
     # Find matching devices (partial, case-insensitive)
-    $matches = $devices | Where-Object { $_.Name -like "*$Name*" }
+    $matches = @($devices | Where-Object { $_.Name -like "*$Name*" })
 
     if ($matches.Count -eq 0) {
         Write-Host "No device found matching: $Name" -ForegroundColor Red
         Write-Host ""
         Write-Host "Available devices:" -ForegroundColor Yellow
-        foreach ($dev in $devices) {
-            Write-Host "  - $($dev.Name)"
+        $uniqueNames = $devices | Select-Object -ExpandProperty Name -Unique
+        foreach ($n in $uniqueNames) {
+            Write-Host "  - $n"
         }
         return
     }
 
-    if ($matches.Count -gt 1) {
-        Write-Host "Multiple devices match '$Name':" -ForegroundColor Yellow
-        foreach ($dev in $matches) {
-            Write-Host "  - $($dev.Name)"
+    # Multiple matches is OK - Bluetooth devices have multiple entries (audio, AVRCP, etc.)
+    # We'll target all of them since they're part of the same physical device
+    Write-Host ""
+    Write-Host "Found $($matches.Count) device entries matching '$Name':" -ForegroundColor Cyan
+    foreach ($dev in $matches) {
+        Write-Host "  - $($dev.Name) [$($dev.Class)] - $($dev.Status)" -ForegroundColor Gray
+    }
+    Write-Host ""
+
+    $successCount = 0
+    $failCount = 0
+    $skipCount = 0
+
+    foreach ($device in $matches) {
+        try {
+            Write-Host "$actionVerb $($device.Name) [$($dev.Class)]..." -ForegroundColor Yellow -NoNewline
+
+            if ($Enable) {
+                if ($device.Status -eq "OK") {
+                    Write-Host " already enabled, skipping" -ForegroundColor Gray
+                    $skipCount++
+                    continue
+                }
+                Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+            } else {
+                if ($device.Status -ne "OK") {
+                    Write-Host " already disabled, skipping" -ForegroundColor Gray
+                    $skipCount++
+                    continue
+                }
+                Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
+            }
+
+            Write-Host " OK" -ForegroundColor Green
+            $successCount++
+
+        } catch {
+            Write-Host " FAILED" -ForegroundColor Red
+            $failCount++
+
+            if ($_.Exception.Message -match "Access|denied|admin|privilege") {
+                Write-Host "  Requires administrator privileges" -ForegroundColor Yellow
+            } else {
+                Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+            }
         }
-        Write-Host ""
-        Write-Host "Please use a more specific name." -ForegroundColor Yellow
-        return
     }
 
-    $device = $matches[0]
     Write-Host ""
-    Write-Host "Device: $($device.Name)" -ForegroundColor Cyan
-    Write-Host "Current status: $($device.Status)" -ForegroundColor Gray
-    Write-Host ""
-
-    try {
-        if ($Enable) {
-            Write-Host "Enabling device..." -ForegroundColor Yellow
-            Enable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
-        } else {
-            Write-Host "Disabling device..." -ForegroundColor Yellow
-            Disable-PnpDevice -InstanceId $device.InstanceId -Confirm:$false -ErrorAction Stop
-        }
-
-        Write-Host "Device $actionPast successfully." -ForegroundColor Green
+    if ($successCount -gt 0) {
+        Write-Host "$successCount device(s) $actionPast successfully." -ForegroundColor Green
+    }
+    if ($skipCount -gt 0) {
+        Write-Host "$skipCount device(s) skipped (already in desired state)." -ForegroundColor Gray
+    }
+    if ($failCount -gt 0) {
+        Write-Host "$failCount device(s) failed." -ForegroundColor Red
         Write-Host ""
-        Write-Host "Note: Audio may take a few seconds to switch." -ForegroundColor Gray
+        Write-Host "Try running as Administrator:" -ForegroundColor Yellow
+        Write-Host "  Right-click the .bat file -> Run as administrator" -ForegroundColor White
+    }
 
-    } catch {
-        Write-Host "Failed to $action device." -ForegroundColor Red
+    if ($successCount -gt 0) {
         Write-Host ""
-
-        if ($_.Exception.Message -match "Access|denied|admin|privilege") {
-            Write-Host "This operation requires administrator privileges." -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host "Try running as Administrator:" -ForegroundColor Cyan
-            Write-Host "  1. Right-click bt-$action.bat" -ForegroundColor White
-            Write-Host "  2. Select 'Run as administrator'" -ForegroundColor White
-        } else {
-            Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red
-        }
+        Write-Host "Note: Audio switching may take a few seconds." -ForegroundColor Gray
     }
 }
 
